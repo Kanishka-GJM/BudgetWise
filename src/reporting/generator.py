@@ -5,9 +5,16 @@ import os
 def identify_recurring(df):
     df_debit = df[df['type'] == 'DEBIT'].copy()
     df_debit['month_year'] = df_debit['date'].dt.to_period('M')
-    recurring = df_debit.groupby(['narration', 'month_year']).size().reset_index(name='count')
-    recurring_merchants = recurring[recurring['count'] >= 1]['narration'].unique()
-    return list(recurring_merchants)
+    recurring = df_debit.groupby('narration').agg(
+        total_count=('month_year', 'count'),
+        unique_months=('month_year', 'nunique')
+    ).reset_index()
+    
+    recurring_merchants = recurring[
+        (recurring['unique_months'] >= 2) & 
+        (recurring['total_count'] >= recurring['unique_months'])
+    ]['narration'].tolist()
+    return recurring_merchants
 
 def generate_report(forecast=None):
     gold_path = 'data/gold/enriched_transactions.parquet'
@@ -16,6 +23,10 @@ def generate_report(forecast=None):
         return
         
     df = pd.read_parquet(gold_path)
+    
+    # Identify subscriptions
+    recurring_merchants = identify_recurring(df)
+    df.loc[df['narration'].isin(recurring_merchants), 'predicted_category'] = 'Subscriptions'
     
     # Force some 'Unknown' transactions for demonstration purposes if none exist
     # (By mapping Uncategorized to Unknown)
@@ -79,6 +90,7 @@ def generate_report(forecast=None):
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BudgetWise Analytics</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {{
             --bg-color: #0f172a;
@@ -281,6 +293,13 @@ def generate_report(forecast=None):
         <!-- Metrics injected by JS -->
     </div>
     
+    <div style="background: var(--surface-color); padding: 1.5rem; border-radius: 1rem; margin-bottom: 3rem; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2);">
+        <h2 style="margin-bottom: 1rem; font-size: 1.2rem;">Spending Breakdown</h2>
+        <div style="height: 300px; display: flex; justify-content: center;">
+            <canvas id="categoryChart"></canvas>
+        </div>
+    </div>
+    
     <h2 style="margin-bottom: 1rem; font-size: 1.2rem;">Transaction Categorizer</h2>
     <p style="color: var(--text-muted); margin-bottom: 2rem; font-size: 0.9rem;">
         Drag and drop transactions from the <strong style="color:var(--warning)">Unknown</strong> column into their correct categories to update your spending profile.
@@ -317,6 +336,37 @@ def generate_report(forecast=None):
         // Render Board
         const board = document.getElementById('board-container');
         
+        // Calculate initial chart data from board data
+        const initialChartData = appData.categories.map(cat => {{
+            const txs = appData.board[cat] || [];
+            return txs.reduce((sum, tx) => sum + tx.amount, 0);
+        }});
+
+        // Render Chart
+        const ctx = document.getElementById('categoryChart').getContext('2d');
+        window.myChart = new Chart(ctx, {{
+            type: 'doughnut',
+            data: {{
+                labels: appData.categories,
+                datasets: [{{
+                    data: initialChartData,
+                    backgroundColor: [
+                        '#f43f5e', '#8b5cf6', '#ec4899', '#14b8a6', 
+                        '#eab308', '#3b82f6', '#64748b', '#f59e0b'
+                    ],
+                    borderWidth: 0,
+                    hoverOffset: 10
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{ position: 'right', labels: {{ color: '#94a3b8' }} }}
+                }}
+            }}
+        }});
+
         appData.categories.forEach(cat => {{
             const txs = appData.board[cat] || [];
             const colHtml = `
@@ -327,7 +377,7 @@ def generate_report(forecast=None):
                     </div>
                     <div class="column-body" id="col-${{cat}}">
                         ${{txs.map(tx => `
-                            <div class="tx-card" draggable="true" id="${{tx.id}}">
+                            <div class="tx-card" draggable="true" id="${{tx.id}}" data-amount="${{tx.amount}}">
                                 <div class="tx-top">
                                     <div class="tx-narration">${{tx.narration}}</div>
                                     <div class="tx-amount">${{formatMoney(tx.amount)}}</div>
@@ -384,11 +434,24 @@ def generate_report(forecast=None):
         }}
         
         function updateCounts() {{
+            const newChartData = [];
             appData.categories.forEach(cat => {{
                 const container = document.getElementById(`col-${{cat}}`);
                 const badge = document.getElementById(`badge-${{cat}}`);
                 badge.innerText = container.children.length;
+                
+                // Recalculate amounts for chart
+                let sum = 0;
+                for(let i=0; i<container.children.length; i++) {{
+                    sum += parseFloat(container.children[i].getAttribute('data-amount'));
+                }}
+                newChartData.push(sum);
             }});
+            
+            if (window.myChart) {{
+                window.myChart.data.datasets[0].data = newChartData;
+                window.myChart.update();
+            }}
         }}
     </script>
 </body>
