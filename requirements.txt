@@ -7,3 +7,8 @@ matplotlib
 seaborn
 tqdm
 faker
+pytesseract
+Pillow
+fastapi
+uvicorn
+python-multipart

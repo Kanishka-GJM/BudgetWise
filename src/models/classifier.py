@@ -28,23 +28,35 @@ class CharDataset(Dataset):
         
         return torch.tensor(encoded, dtype=torch.long), torch.tensor(label, dtype=torch.long)
 
-class BiLSTMClassifier(nn.Module):
-    def __init__(self, vocab_size, embed_dim, hidden_dim, output_dim):
+class TransformerClassifier(nn.Module):
+    def __init__(self, vocab_size, embed_dim, num_heads, hidden_dim, num_layers, output_dim, max_len):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True, bidirectional=True)
-        self.fc = nn.Linear(hidden_dim * 2, output_dim)
+        self.pos_encoder = nn.Embedding(max_len, embed_dim)
+        
+        encoder_layers = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=hidden_dim, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers)
+        self.fc = nn.Linear(embed_dim, output_dim)
         
     def forward(self, x):
-        embedded = self.embedding(x)
-        output, (hidden, cell) = self.lstm(embedded)
-        # Concat the final forward and backward hidden states
-        hidden = torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim=1)
-        out = self.fc(hidden)
+        seq_len = x.size(1)
+        positions = torch.arange(0, seq_len, device=x.device).unsqueeze(0).expand(x.size(0), seq_len)
+        embedded = self.embedding(x) + self.pos_encoder(positions)
+        
+        # padding mask: True where padded
+        src_key_padding_mask = (x == 0)
+        
+        output = self.transformer_encoder(embedded, src_key_padding_mask=src_key_padding_mask)
+        
+        # Mean pooling ignoring padding
+        mask = (x != 0).unsqueeze(-1).float()
+        pooled = (output * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
+        
+        out = self.fc(pooled)
         return out
 
 def train_classifier(df, model_path):
-    print("Training BiLSTM Merchant Classifier...")
+    print("Training Transformer Merchant Classifier...")
     chars = set(''.join(df['narration'].astype(str).tolist()))
     max_len = 50
     categories = df['true_category'].unique()
@@ -53,7 +65,7 @@ def train_classifier(df, model_path):
     dataset = CharDataset(df['narration'], df['true_category'], chars, max_len, category_map)
     loader = DataLoader(dataset, batch_size=64, shuffle=True)
     
-    model = BiLSTMClassifier(len(chars) + 1, 32, 64, len(categories))
+    model = TransformerClassifier(len(chars) + 1, embed_dim=64, num_heads=4, hidden_dim=128, num_layers=2, output_dim=len(categories), max_len=max_len)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.01)
     
@@ -88,7 +100,7 @@ def predict_categories(df, model_path):
     max_len = checkpoint['max_len']
     idx2cat = {i: cat for cat, i in category_map.items()}
     
-    model = BiLSTMClassifier(len(char2idx) + 1, 32, 64, len(categories))
+    model = TransformerClassifier(len(char2idx) + 1, embed_dim=64, num_heads=4, hidden_dim=128, num_layers=2, output_dim=len(categories), max_len=max_len)
     model.load_state_dict(checkpoint['model_state'])
     model.eval()
     
@@ -105,7 +117,7 @@ def predict_categories(df, model_path):
             probs = torch.softmax(out, dim=1)
             conf, pred = torch.max(probs, dim=1)
             
-            if conf.item() < 0.7:
+            if conf.item() < 0.4:
                 preds_list.append('Uncategorized')
             else:
                 preds_list.append(idx2cat[pred.item()])
